@@ -1,0 +1,148 @@
+#####20230830
+###茨城県つくば市天王台1-1-1 医学系学系棟402
+###筑波大学　医学医療系　
+###放射線診断ＩＶＲ　
+###https://researchmap.jp/gwc
+###https://scholar.google.co.jp/citations?user=Ploe5FEAAAAJ&hl=ja
+##顧 文超 
+##GU WENCHAO PhD
+
+
+
+#### single cell analysis
+Tel: 029-853-3205（内線7829）
+Email: sunferrero@gmail.com
+library(data.table)
+library(tibble)                 
+library(dplyr)
+library(Seurat)
+library(tidyverse)
+
+
+## setting dir
+getwd()
+setwd('./sc_study/')
+#BiocManager::install('Seurat',update = F,ask = F)
+
+gc()
+#load data
+CT <- Read10X(data.dir = './CT/')
+PR <- Read10X(data.dir = './PR')
+
+#creat SeuratObject
+scRNA1 <- CreateSeuratObject(counts = CT, project = "CT")
+scRNA2 <- CreateSeuratObject(counts = PR, project = "PR")
+
+#merge two sample and add name
+sce.all = merge(scRNA1, y = c(scRNA2), add.cell.ids = c("CT", "PR"),
+                project = 'PR', merge.data = TRUE)
+
+
+#define the metadata 
+sce.all@meta.data$patient=sce.all@meta.data$orig.ident
+#sce.all@meta.data$orig.ident=stringr::str_remove(sce.all@meta.data$orig.ident,'[0-9]')
+
+# start
+scRNA=sce.all
+##QC
+#mitochondria 
+scRNA[["percent.mt"]] <- PercentageFeatureSet(scRNA, pattern = "^MT-")
+#Hemoglobin  
+HB.genes <- c("HBA1","HBA2","HBB","HBD","HBE1","HBG1","HBG2","HBM","HBQ1","HBZ")
+HB_m <- match(HB.genes, rownames(scRNA@assays$RNA)) 
+HB.genes <- rownames(scRNA@assays$RNA)[HB_m] 
+HB.genes <- HB.genes[!is.na(HB.genes)] 
+scRNA[["percent.HB"]]<-PercentageFeatureSet(scRNA, features=HB.genes) 
+col.num <- length(levels(scRNA@active.ident))
+#before QC
+violin <- VlnPlot(scRNA,
+                  features = c("nFeature_RNA", "nCount_RNA", "percent.mt","percent.HB"), 
+                  cols =rainbow(col.num), 
+                  pt.size = 0.01, #if no need the point, pt.size = 0
+                  ncol = 4) + 
+  theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank()) 
+violin
+
+##set for QC
+print(c("please input the number：", "minGene=200", "maxGene=2500", "pctMT=10",'pctHB=3'))
+minGene=200
+maxGene=2500
+pctMT=20
+pctHB=5
+
+##1.QC
+scRNA <- subset(scRNA, subset = nFeature_RNA > minGene & nFeature_RNA < maxGene & percent.mt < pctMT & percent.HB < pctHB)
+
+col.num <- length(levels(scRNA@active.ident))
+violin <-VlnPlot(scRNA,
+                 features = c("nFeature_RNA", "nCount_RNA", "percent.mt","percent.HB"), 
+                 cols =rainbow(col.num), 
+                 pt.size = 0.1, 
+                 ncol = 4) + 
+  theme(axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank()) 
+violin
+# Normalize
+scRNA <- NormalizeData(scRNA, normalization.method = "LogNormalize", scale.factor = 10000)
+
+#2.reduction and clustering#########################
+library(Seurat)
+library(tidyverse)
+library(patchwork)
+
+#3 VariableFeatures2000
+scRNA <- FindVariableFeatures(scRNA, selection.method = "vst", nfeatures = 2000) 
+
+scale.genes <-  VariableFeatures(scRNA)
+scRNA <- ScaleData(scRNA, features = scale.genes)
+
+scRNA <- RunPCA(scRNA, features = VariableFeatures(scRNA)) 
+plot1 <- DimPlot(scRNA, reduction = "pca", group.by="orig.ident") 
+plot2 <- ElbowPlot(scRNA, ndims=20, reduction="pca") 
+plotc <- plot1+plot2
+plotc
+
+#4 select PCA
+pc.num=1:10
+
+scRNA <- FindNeighbors(scRNA, dims = pc.num) 
+#5 Clustering
+scRNA <- FindClusters(scRNA)
+#6 UMAP 
+scRNA <- RunUMAP(scRNA, dims = pc.num)
+embed_umap <- Embeddings(scRNA, 'umap')
+plot2 = DimPlot(scRNA, reduction = "umap",label = T) 
+plot2
+
+###3.identfy cell name（SingleR）
+### SingleR   BiocManager::install('SingleR')
+BiocManager::install('SingleR')
+library(SingleR)
+#refdata <- SingleR::MouseRNAseqData()
+refdata <- HumanPrimaryCellAtlasData()
+#save(refdata,file ='refdata_singleR.Rdata')
+load('../refdata_singleR.Rdata')
+testdata <- GetAssayData(scRNA, slot="data")
+clusters <- scRNA@meta.data$seurat_clusters
+cellpred <- SingleR(test = testdata, ref = refdata,
+                    labels =refdata$label.main,
+                    method = "cluster", clusters = clusters, 
+                    assay.type.test = "logcounts", assay.type.ref = "logcounts")
+
+celltype = data.frame(ClusterID=rownames(cellpred), celltype=cellpred$labels, stringsAsFactors = F)
+
+scRNA@meta.data$celltype = "NA"
+for(i in 1:nrow(celltype)){
+  scRNA@meta.data[which(scRNA@meta.data$seurat_clusters == celltype$ClusterID[i]),'celltype'] <- celltype$celltype[i]}
+DimPlot(scRNA)
+p2 = DimPlot(scRNA, group.by="celltype", label=T, label.size=4.5, reduction='umap',
+             )
+p2
+
+
+#### ！！！！！
+Idents(scRNA)=scRNA$celltype 
+DimPlot(scRNA,label = T)
+
+save(scRNA,file ='scRNA_anno.RDS')
+
+scRNA=readRDS('./scRNA_anno.RDS')
